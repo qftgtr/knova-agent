@@ -5,7 +5,7 @@ from typing import Optional
 
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .auth import require_knova_secret
 from .gitops import ensure_repo
@@ -25,10 +25,7 @@ class MessageBody(BaseModel):
     text: str
     sender: MessageFrom = Field(alias="from")
 
-    model_config = {"populate_by_name": True}
-
-    class Config:
-        allow_population_by_field_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 @app.on_event("startup")
