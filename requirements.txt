@@ -1,5 +1,3 @@
-fastapi
-uvicorn
 langgraph
 psycopg[binary]
 openai

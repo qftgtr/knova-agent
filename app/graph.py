@@ -24,6 +24,9 @@ def _call_llm(text: str, settings: Settings) -> str:
     if settings.ai_model_provider != "openai":
         raise RuntimeError(f"Unsupported provider {settings.ai_model_provider}")
 
+    if not settings.ai_model_key_openai:
+        raise RuntimeError("Missing AI_MODEL_KEY_OPENAI")
+
     client = _get_openai_client(settings.ai_model_key_openai)
     response = client.chat.completions.create(
         model=settings.ai_model_name,
@@ -34,7 +37,10 @@ def _call_llm(text: str, settings: Settings) -> str:
     return message or ""
 
 
-def _build_checkpointer(database_url: str):
+def _build_checkpointer(database_url: str | None):
+    if not database_url:
+        return MemorySaver()
+
     try:
         from langgraph.checkpoint.postgres import PostgresSaver
 

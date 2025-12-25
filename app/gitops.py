@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .settings import Settings
+
+@dataclass(frozen=True)
+class RepoConfig:
+    repo_url: str
+    workdir: str
+    branch_name: str = "knova/mvp-test"
+    github_token: str | None = None
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> None:
@@ -14,7 +21,7 @@ def _run(cmd: list[str], cwd: Path | None = None) -> None:
 def _with_token(repo_url: str, token: str) -> str:
     parsed = urlparse(repo_url)
     if parsed.scheme != "https":
-        raise RuntimeError("GITHUB_REPO_URL must use https")
+        raise RuntimeError("repo_url must use https")
 
     netloc = f"x-access-token:{token}@{parsed.netloc}"
     return parsed._replace(netloc=netloc).geturl()
@@ -29,17 +36,19 @@ def _git_branch_exists(repo_dir: Path, branch_name: str) -> bool:
     return result.returncode == 0
 
 
-def ensure_repo(settings: Settings) -> None:
-    repo_dir = Path(settings.workdir)
+def ensure_repo(config: RepoConfig) -> None:
+    repo_dir = Path(config.workdir)
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
 
     if not repo_dir.exists():
-        clone_url = _with_token(settings.github_repo_url, settings.github_token)
-        _run(["git", "clone", clone_url, str(repo_dir)])
+        clone_url = config.repo_url
+        if config.github_token:
+            clone_url = _with_token(config.repo_url, config.github_token)
+        _run(["git", "clone", "--depth", "1", clone_url, str(repo_dir)])
     elif not (repo_dir / ".git").exists():
         raise RuntimeError(f"Workdir {repo_dir} exists but is not a git repo")
 
-    branch_name = settings.branch_name
+    branch_name = config.branch_name
     if _git_branch_exists(repo_dir, branch_name):
         _run(["git", "-C", str(repo_dir), "checkout", branch_name])
     else:

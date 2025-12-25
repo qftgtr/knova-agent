@@ -1,0 +1,6 @@
+{
+  "name": "knova-agent",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "postCreateCommand": "pip install -r requirements.txt",
+  "postStartCommand": "nohup python -m app.worker > /workspaces/knova-agent/.knova/worker.log 2>&1 &"
+}
