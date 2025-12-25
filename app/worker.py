@@ -12,7 +12,7 @@ from .gitops import RepoConfig, ensure_repo
 
 CONFIG_DIR = Path("/workspaces/knova-agent/.knova")
 CONFIG_PATH = CONFIG_DIR / "config.json"
-WORKDIR_ROOT = Path("/workspaces/workdir")
+WORKDIR_ROOT = Path("/workspaces")
 
 
 def _get_runner_id() -> str:
