@@ -29,7 +29,7 @@ def _get_env(
 @dataclass(frozen=True)
 class Settings:
     github_repo_url: str | None
-    github_token: str | None
+    repo_auth_token: str | None
     knova_agent_secret: str | None
     knova_hub_url: str | None
     database_url: str | None
@@ -44,7 +44,7 @@ class Settings:
 def get_settings() -> Settings:
     return Settings(
         github_repo_url=_get_env("GITHUB_REPO_URL"),
-        github_token=_get_env("GITHUB_TOKEN"),
+        repo_auth_token=_get_env("REPO_AUTH_TOKEN_GITHUB") or _get_env("REPO_AUTH_TOKEN"),
         knova_agent_secret=_get_env("KNOVA_AGENT_SECRET"),
         knova_hub_url=_get_env("KNOVA_HUB_URL"),
         database_url=_get_env("DATABASE_URL"),

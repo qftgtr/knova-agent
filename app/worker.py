@@ -118,14 +118,14 @@ def run() -> None:
 
     workdir = _build_workdir(repo_url)
     branch_name = os.getenv("KNOVA_BRANCH_NAME", "knova/mvp-test")
-    github_token = os.getenv("GITHUB_TOKEN") or None
+    repo_auth_token = os.getenv("REPO_AUTH_TOKEN_GITHUB") or os.getenv("REPO_AUTH_TOKEN") or None
 
     ensure_repo(
         RepoConfig(
             repo_url=repo_url,
             workdir=str(workdir),
             branch_name=branch_name,
-            github_token=github_token,
+            repo_auth_token=repo_auth_token,
         )
     )
 

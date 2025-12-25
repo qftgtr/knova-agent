@@ -11,7 +11,7 @@ class RepoConfig:
     repo_url: str
     workdir: str
     branch_name: str = "knova/mvp-test"
-    github_token: str | None = None
+    repo_auth_token: str | None = None
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> None:
@@ -42,8 +42,8 @@ def ensure_repo(config: RepoConfig) -> None:
 
     if not repo_dir.exists():
         clone_url = config.repo_url
-        if config.github_token:
-            clone_url = _with_token(config.repo_url, config.github_token)
+        if config.repo_auth_token:
+            clone_url = _with_token(config.repo_url, config.repo_auth_token)
         _run(["git", "clone", "--depth", "1", clone_url, str(repo_dir)])
     elif not (repo_dir / ".git").exists():
         raise RuntimeError(f"Workdir {repo_dir} exists but is not a git repo")
