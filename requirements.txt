@@ -3,3 +3,4 @@ psycopg[binary]
 openai
 httpx
 python-dotenv
+websocket-client

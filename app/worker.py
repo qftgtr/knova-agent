@@ -2,17 +2,30 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
+import websocket
 
 from .gitops import RepoConfig, ensure_repo
+from .graph import build_graph, run_graph
+from .settings import get_settings
 
 CONFIG_DIR = Path("/workspaces/knova-agent/.knova")
 CONFIG_PATH = CONFIG_DIR / "config.json"
 WORKDIR_ROOT = Path("/workspaces")
+LOG_DIR = CONFIG_DIR / "command_logs"
+LOG_INDEX_PATH = LOG_DIR / "index.json"
+
+HEARTBEAT_INTERVAL_SEC = 5
+RECONNECT_DELAY_SEC = 5
+MAX_LOGGED_COMMANDS = 3
+
+DEFAULT_MESSAGE_ID = "main"
 
 
 def _get_runner_id() -> str:
@@ -104,6 +117,226 @@ def _build_workdir(repo_url: str) -> Path:
     return WORKDIR_ROOT / org / repo
 
 
+def _build_ws_url(hub_url: str, runner: str) -> str:
+    if hub_url.startswith("https://"):
+        base = f"wss://{hub_url[len('https://'):]}"
+    elif hub_url.startswith("http://"):
+        base = f"ws://{hub_url[len('http://'):]}"
+    else:
+        raise RuntimeError("KNOVA_HUB_URL must start with http:// or https://")
+    return f"{base.rstrip('/')}/workspace/ws?runner={runner}"
+
+
+def _safe_log_name(command_id: str) -> str:
+    return command_id.replace(":", "_")
+
+
+class CommandLogStore:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        self._index = self._load_index()
+
+    def _load_index(self) -> list[str]:
+        if not LOG_INDEX_PATH.exists():
+            return []
+        try:
+            data = json.loads(LOG_INDEX_PATH.read_text())
+        except Exception:
+            return []
+        if isinstance(data, list) and all(isinstance(item, str) for item in data):
+            return data
+        return []
+
+    def _save_index(self) -> None:
+        LOG_INDEX_PATH.write_text(json.dumps(self._index))
+
+    def _log_path(self, command_id: str) -> Path:
+        return LOG_DIR / f"{_safe_log_name(command_id)}.jsonl"
+
+    def register_command(self, command_id: str) -> None:
+        with self._lock:
+            if command_id not in self._index:
+                self._index.append(command_id)
+            while len(self._index) > MAX_LOGGED_COMMANDS:
+                expired = self._index.pop(0)
+                try:
+                    self._log_path(expired).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            self._save_index()
+
+    def has_command(self, command_id: str) -> bool:
+        with self._lock:
+            return command_id in self._index and self._log_path(command_id).exists()
+
+    def append_event(self, command_id: str, event: dict[str, object]) -> None:
+        with self._lock:
+            path = self._log_path(command_id)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event))
+                handle.write("\n")
+
+    def read_events_since(self, command_id: str, since: int) -> list[dict[str, object]]:
+        path = self._log_path(command_id)
+        if not path.exists():
+            return []
+
+        events: list[dict[str, object]] = []
+        with self._lock:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    seq = event.get("seq")
+                    if isinstance(seq, int) and seq > since:
+                        events.append(event)
+
+        return events
+
+
+class WsSender:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._ws: websocket.WebSocketApp | None = None
+        self._connected = False
+
+    def set_ws(self, ws: websocket.WebSocketApp) -> None:
+        with self._lock:
+            self._ws = ws
+            self._connected = True
+
+    def clear_ws(self) -> None:
+        with self._lock:
+            self._ws = None
+            self._connected = False
+
+    def send(self, payload: dict[str, object]) -> bool:
+        raw = json.dumps(payload)
+        with self._lock:
+            if not self._connected or self._ws is None:
+                return False
+            try:
+                self._ws.send(raw)
+                return True
+            except Exception:
+                return False
+
+
+class CommandExecutor:
+    def __init__(self, sender: WsSender, log_store: CommandLogStore) -> None:
+        self._sender = sender
+        self._log_store = log_store
+        self._queue: queue.Queue[dict[str, object]] = queue.Queue()
+        self._current_command_id: str | None = None
+        self._pending_commands: set[str] = set()
+        self._seq_by_command: dict[str, int] = {}
+        self._state_lock = threading.Lock()
+        self._graph = build_graph(get_settings())
+
+        worker = threading.Thread(target=self._run, daemon=True)
+        worker.start()
+
+    def enqueue_command(self, command_id: str, payload: dict[str, object]) -> None:
+        with self._state_lock:
+            if self._current_command_id == command_id:
+                return
+            if self._current_command_id is not None:
+                return
+            if command_id in self._pending_commands:
+                return
+
+        if self._log_store.has_command(command_id):
+            return
+
+        with self._state_lock:
+            self._pending_commands.add(command_id)
+        self._queue.put({"command_id": command_id, "payload": payload})
+
+    def _next_seq(self, command_id: str) -> int:
+        value = self._seq_by_command.get(command_id, 0)
+        self._seq_by_command[command_id] = value + 1
+        return value
+
+    def _send_event(
+        self,
+        command_id: str,
+        message_id: str,
+        op: str,
+        data: dict[str, object] | None = None,
+    ) -> None:
+        seq = self._next_seq(command_id)
+        event: dict[str, object] = {
+            "type": "event",
+            "command_id": command_id,
+            "message_id": message_id,
+            "seq": seq,
+            "op": op,
+            "data": data or {},
+        }
+        self._log_store.append_event(command_id, event)
+        self._sender.send(event)
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            command_id = item.get("command_id")
+            payload = item.get("payload")
+            if not isinstance(command_id, str) or not isinstance(payload, dict):
+                continue
+            text = payload.get("text")
+            if not isinstance(text, str):
+                continue
+
+            with self._state_lock:
+                self._current_command_id = command_id
+
+            self._seq_by_command[command_id] = 0
+            self._log_store.register_command(command_id)
+
+            self._send_event(command_id, DEFAULT_MESSAGE_ID, "set_status", {"status": "STARTED"})
+
+            try:
+                reply = run_graph(self._graph, text, command_id)
+                self._send_event(command_id, DEFAULT_MESSAGE_ID, "set_text", {"text": reply})
+                self._send_event(command_id, DEFAULT_MESSAGE_ID, "terminal", {"result": "success"})
+            except Exception:
+                self._send_event(command_id, DEFAULT_MESSAGE_ID, "set_text", {"text": "Task failed."})
+                self._send_event(command_id, DEFAULT_MESSAGE_ID, "terminal", {"result": "failed"})
+            finally:
+                with self._state_lock:
+                    self._current_command_id = None
+                    self._pending_commands.discard(command_id)
+                self._seq_by_command.pop(command_id, None)
+
+
+def _heartbeat_loop(sender: WsSender, stop_event: threading.Event) -> None:
+    while not stop_event.wait(HEARTBEAT_INTERVAL_SEC):
+        sender.send({"type": "ping", "ts": int(time.time() * 1000)})
+
+
+def _resync_command(
+    sender: WsSender,
+    log_store: CommandLogStore,
+    command_id: str,
+    since: int,
+) -> None:
+    if not log_store.has_command(command_id):
+        sender.send({"type": "not_found", "command_id": command_id})
+        return
+
+    events = log_store.read_events_since(command_id, since)
+    for event in events:
+        sender.send(event)
+
+
 def run() -> None:
     runner_id = _get_runner_id()
     hub_url = _get_hub_url()
@@ -131,8 +364,69 @@ def run() -> None:
 
     _post_status(hub_url, runner_id, "ready", secret)
 
+    sender = WsSender()
+    log_store = CommandLogStore()
+    executor = CommandExecutor(sender, log_store)
+
+    ws_url = _build_ws_url(hub_url, runner_id)
+    headers = [f"X-Knova-Secret: {secret}"]
+
     while True:
-        time.sleep(60)
+        stop_event = threading.Event()
+
+        def on_open(ws_app: websocket.WebSocketApp) -> None:
+            sender.set_ws(ws_app)
+            threading.Thread(
+                target=_heartbeat_loop, args=(sender, stop_event), daemon=True
+            ).start()
+
+        def on_message(ws_app: websocket.WebSocketApp, message: str) -> None:
+            if isinstance(message, (bytes, bytearray)):
+                message = message.decode("utf-8", errors="ignore")
+            try:
+                payload = json.loads(message)
+            except Exception:
+                return
+            if not isinstance(payload, dict):
+                return
+
+            msg_type = payload.get("type")
+            if msg_type == "command":
+                command_id = payload.get("command_id")
+                cmd_payload = payload.get("payload")
+                if isinstance(command_id, str) and isinstance(cmd_payload, dict):
+                    executor.enqueue_command(command_id, cmd_payload)
+                return
+
+            if msg_type == "resync":
+                command_id = payload.get("command_id")
+                since = payload.get("since")
+                if isinstance(command_id, str) and isinstance(since, int):
+                    _resync_command(sender, log_store, command_id, since)
+
+        def on_error(ws_app: websocket.WebSocketApp, error: object) -> None:
+            sender.clear_ws()
+            stop_event.set()
+
+        def on_close(ws_app: websocket.WebSocketApp, status: int, msg: str) -> None:
+            sender.clear_ws()
+            stop_event.set()
+
+        ws_app = websocket.WebSocketApp(
+            ws_url,
+            header=headers,
+            on_open=on_open,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+        )
+
+        try:
+            ws_app.run_forever()
+        except Exception:
+            pass
+        stop_event.set()
+        time.sleep(RECONNECT_DELAY_SEC)
 
 
 if __name__ == "__main__":
