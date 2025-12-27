@@ -7,5 +7,5 @@
     }
   },
   "postCreateCommand": "sudo apt-get update && sudo apt-get install -y supervisor && pip install -r requirements.txt && npm i -g @openai/codex",
-  "postStartCommand": "sh -c 'mkdir -p /workspaces/knova-agent/.knova && if [ -f /workspaces/knova-agent/.knova/supervisord.pid ] && kill -0 $(cat /workspaces/knova-agent/.knova/supervisord.pid) 2>/dev/null; then exit 0; else supervisord -c /workspaces/knova-agent/.devcontainer/supervisord.conf; fi'"
+  "postStartCommand": "sh -c 'printenv OPENAI_API_KEY | codex login --with-api-key && mkdir -p /workspaces/knova-agent/.knova && if [ -f /workspaces/knova-agent/.knova/supervisord.pid ] && kill -0 $(cat /workspaces/knova-agent/.knova/supervisord.pid) 2>/dev/null; then exit 0; else supervisord -c /workspaces/knova-agent/.devcontainer/supervisord.conf; fi'"
 }
