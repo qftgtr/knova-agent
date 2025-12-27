@@ -1,6 +1,11 @@
 {
   "name": "knova-agent",
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y supervisor nodejs npm && pip install -r requirements.txt && sudo npm i -g @openai/codex",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
+    }
+  },
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y supervisor && pip install -r requirements.txt && sudo npm i -g @openai/codex",
   "postStartCommand": "sh -c 'mkdir -p /workspaces/knova-agent/.knova && if [ -f /workspaces/knova-agent/.knova/supervisord.pid ] && kill -0 $(cat /workspaces/knova-agent/.knova/supervisord.pid) 2>/dev/null; then exit 0; else supervisord -c /workspaces/knova-agent/.devcontainer/supervisord.conf; fi'"
 }

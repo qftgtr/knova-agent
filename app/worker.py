@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import shutil
 import subprocess
 import threading
 import time
+import traceback
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -22,6 +24,8 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 WORKDIR_ROOT = Path("/workspaces")
 LOG_DIR = CONFIG_DIR / "command_logs"
 LOG_INDEX_PATH = LOG_DIR / "index.json"
+
+logger = logging.getLogger("knova-agent")
 
 HEARTBEAT_INTERVAL_SEC = 5
 RECONNECT_DELAY_SEC = 5
@@ -147,7 +151,7 @@ def _build_codex_prompt(question: str) -> str:
     )
 
 
-def _run_codex_exec(repo_dir: Path, question: str) -> str:
+def _run_codex_exec(command_id: str, repo_dir: Path, question: str) -> str:
     codex_path = shutil.which("codex")
     if not codex_path:
         raise RuntimeError("codex CLI not found in PATH")
@@ -156,7 +160,7 @@ def _run_codex_exec(repo_dir: Path, question: str) -> str:
     if not api_key:
         raise RuntimeError("Missing OPENAI_API_KEY / AI_MODEL_KEY_OPENAI for codex")
 
-    out_path = CONFIG_DIR / "codex_last_message.txt"
+    out_path = CONFIG_DIR / f"codex_last_message_{_safe_log_name(command_id)}.txt"
     prompt = _build_codex_prompt(question)
 
     env = os.environ.copy()
@@ -173,23 +177,61 @@ def _run_codex_exec(repo_dir: Path, question: str) -> str:
         str(out_path),
     ]
 
-    subprocess.run(
+    _append_debug_log(
+        command_id,
+        "\n".join(
+            [
+                f"[codex] repo_dir={repo_dir}",
+                f"[codex] OPENAI_API_KEY set={bool(env.get('OPENAI_API_KEY'))}",
+                f"[codex] cmd={' '.join(cmd)}",
+            ]
+        ),
+    )
+
+    result = subprocess.run(
         cmd,
-        check=True,
+        check=False,
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
         timeout=CODEX_TIMEOUT_SEC,
     )
+
+    _append_debug_log(command_id, f"[codex] exit_code={result.returncode}")
+    if result.stderr:
+        _append_debug_log(command_id, f"[codex] stderr:\\n{result.stderr.strip()}")
+    if result.stdout:
+        _append_debug_log(command_id, f"[codex] stdout:\\n{result.stdout.strip()}")
+
+    if result.returncode != 0:
+        stderr_first_line = (result.stderr or "").strip().splitlines()[:1]
+        suffix = f": {stderr_first_line[0]}" if stderr_first_line else ""
+        raise RuntimeError(f"codex exec failed (exit {result.returncode}){suffix}")
 
     try:
         return out_path.read_text(encoding="utf-8").strip()
     except Exception:
-        return ""
+        return (result.stdout or "").strip()
 
 
 def _safe_log_name(command_id: str) -> str:
     return command_id.replace(":", "_")
+
+
+def _append_debug_log(command_id: str, text: str) -> None:
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        path = CONFIG_DIR / f"command_{_safe_log_name(command_id)}.debug.log"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(text)
+            if not text.endswith("\n"):
+                handle.write("\n")
+    except Exception:
+        pass
+    try:
+        logger.info("%s", text)
+    except Exception:
+        pass
 
 
 class CommandLogStore:
@@ -321,6 +363,7 @@ class CommandExecutor:
         if self._log_store.has_command(command_id):
             return
 
+        _append_debug_log(command_id, "[queue] accepted")
         with self._state_lock:
             self._pending_commands.add(command_id)
         self._queue.put({"command_id": command_id, "payload": payload})
@@ -366,22 +409,34 @@ class CommandExecutor:
             self._seq_by_command[command_id] = 0
             self._log_store.register_command(command_id)
 
+            _append_debug_log(command_id, f"[run] starting text_len={len(text)} repo_dir={self._repo_dir}")
             self._send_event(command_id, DEFAULT_MESSAGE_ID, "set_status", {"status": "STARTED"})
 
             try:
                 repo_dir = self._repo_dir
                 if repo_dir is not None:
-                    reply = _run_codex_exec(repo_dir, text)
+                    try:
+                        reply = _run_codex_exec(command_id, repo_dir, text)
+                    except Exception as exc:
+                        _append_debug_log(command_id, f"[codex] failed: {exc}\\n{traceback.format_exc()}")
+                        reply = ""
                     if not reply:
-                        reply = run_graph(self._graph, text, command_id)
+                        _append_debug_log(command_id, "[run_graph] fallback")
+                        try:
+                            reply = run_graph(self._graph, text, command_id)
+                        except Exception as exc:
+                            _append_debug_log(command_id, f"[run_graph] failed: {exc}\\n{traceback.format_exc()}")
+                            raise
                 else:
                     reply = run_graph(self._graph, text, command_id)
                 self._send_event(command_id, DEFAULT_MESSAGE_ID, "set_text", {"text": reply})
                 self._send_event(command_id, DEFAULT_MESSAGE_ID, "terminal", {"result": "success"})
-            except Exception:
+            except Exception as exc:
+                _append_debug_log(command_id, f"[executor] failed: {exc}\\n{traceback.format_exc()}")
                 self._send_event(command_id, DEFAULT_MESSAGE_ID, "set_text", {"text": "Task failed."})
                 self._send_event(command_id, DEFAULT_MESSAGE_ID, "terminal", {"result": "failed"})
             finally:
+                _append_debug_log(command_id, "[run] finished")
                 with self._state_lock:
                     self._current_command_id = None
                     self._pending_commands.discard(command_id)
@@ -409,8 +464,20 @@ def _resync_command(
 
 
 def run() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     runner_id = _get_runner_id()
     hub_url = _get_hub_url()
+    logger.info(
+        "[startup] runner=%s hub=%s OPENAI_API_KEY set=%s AI_MODEL_KEY_OPENAI set=%s",
+        runner_id,
+        hub_url,
+        bool(os.getenv("OPENAI_API_KEY")),
+        bool(os.getenv("AI_MODEL_KEY_OPENAI")),
+    )
 
     config = _load_cached_config()
     if config is None:
