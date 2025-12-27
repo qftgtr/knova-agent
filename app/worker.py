@@ -147,7 +147,7 @@ def _build_codex_prompt(question: str) -> str:
             "Answer based on the local repository files in the current workspace.",
             "When relevant, cite file paths and line numbers (e.g. src/foo.ts:42).",
             "Be concise and practical.",
-            "输出结果会通过telegram bot api，使用parse_mode=HTML模式发送出去。使用支持的HTML语法进行格式化。",
+            "Use Telegram Bot API `parse_mode=\"HTML\"` formatting only. You may use only these tags: `<b>/<strong>`, `<i>/<em>`, `<u>/<ins>`, `<s>/<strike>/<del>`, `<span class=\"tg-spoiler\">` or `<tg-spoiler>`, `<a href=\"...\">` (including `tg://user?id=...`), `<code>`, `<pre>`, `<pre><code class=\"language-...\">`, `<blockquote>` (optionally `expandable`), and `<tg-emoji emoji-id=\"...\">`. Do not use any other HTML tags (e.g., `<br>`, `<p>`, lists). Escape any literal `&`, `<`, `>` as `&amp;`, `&lt;`, `&gt;`.",
             "",
             f"Question: {question}",
         ]
@@ -196,6 +196,8 @@ def _run_codex_exec(command_id: str, repo_dir: Path, question: str) -> str:
 
     cmd = [
         codex_path,
+        "-m",
+        "gpt-5.1-codex-mini",
         "exec",
         prompt,
         "--full-auto",
