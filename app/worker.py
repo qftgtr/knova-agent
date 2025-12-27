@@ -147,7 +147,7 @@ def _build_codex_prompt(question: str) -> str:
             "Answer based on the local repository files in the current workspace.",
             "When relevant, cite file paths and line numbers (e.g. src/foo.ts:42).",
             "Be concise and practical.",
-            "Use Telegram Bot API `parse_mode=\"HTML\"` formatting only. You may use only these tags: `<b>/<strong>`, `<i>/<em>`, `<u>/<ins>`, `<s>/<strike>/<del>`, `<span class=\"tg-spoiler\">` or `<tg-spoiler>`, `<a href=\"...\">` (including `tg://user?id=...`), `<code>`, `<pre>`, `<pre><code class=\"language-...\">`, `<blockquote>` (optionally `expandable`), and `<tg-emoji emoji-id=\"...\">`. Do not use any other HTML tags (e.g., `<br>`, `<p>`, lists). Escape any literal `&`, `<`, `>` as `&amp;`, `&lt;`, `&gt;`.",
+            "The response MUST be formatted as HTML; DO NOT use any other tags or Markdown. Allowed tags are: `<b>/<strong>`, `<i>/<em>`, `<u>/<ins>`, `<s>/<strike>/<del>`, `<span class=\"tg-spoiler\">` or `<tg-spoiler>`, `<a href=\"...\">` (including `tg://user?id=...`), `<code>`, `<pre>`, `<pre><code class=\"language-...\">`, `<blockquote>` (optionally `expandable`), and `<tg-emoji emoji-id=\"...\">`. Do not use any other HTML tags (e.g., `<br>`, `<p>`, lists). Any literal `&`, `<`, `>` in text **MUST** be escaped as `&amp;`, `&lt;`, `&gt;`.",
             "",
             f"Question: {question}",
         ]
