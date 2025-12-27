@@ -147,6 +147,7 @@ def _build_codex_prompt(question: str) -> str:
             "Answer based on the local repository files in the current workspace.",
             "When relevant, cite file paths and line numbers (e.g. src/foo.ts:42).",
             "Be concise and practical.",
+            "输出结果会通过telegram bot api，使用parse_mode=HTML模式发送出去。使用支持的HTML语法进行格式化。",
             "",
             f"Question: {question}",
         ]
