@@ -24,10 +24,10 @@ def _call_llm(text: str, settings: Settings) -> str:
     if settings.ai_model_provider != "openai":
         raise RuntimeError(f"Unsupported provider {settings.ai_model_provider}")
 
-    if not settings.ai_model_key_openai:
-        raise RuntimeError("Missing AI_MODEL_KEY_OPENAI")
+    if not settings.openai_api_key:
+        raise RuntimeError("Missing OPENAI_API_KEY")
 
-    client = _get_openai_client(settings.ai_model_key_openai)
+    client = _get_openai_client(settings.openai_api_key)
     response = client.chat.completions.create(
         model=settings.ai_model_name,
         messages=[{"role": "user", "content": text}],

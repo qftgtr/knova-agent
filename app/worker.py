@@ -137,7 +137,7 @@ def _build_ws_url(hub_url: str, runner: str) -> str:
 
 
 def _get_openai_api_key() -> str | None:
-    return os.getenv("OPENAI_API_KEY") or os.getenv("AI_MODEL_KEY_OPENAI")
+    return os.getenv("OPENAI_API_KEY")
 
 
 def _build_codex_prompt(question: str) -> str:
@@ -186,7 +186,7 @@ def _run_codex_exec(command_id: str, repo_dir: Path, question: str) -> str:
 
     api_key = _get_openai_api_key()
     if not api_key:
-        raise RuntimeError("Missing OPENAI_API_KEY / AI_MODEL_KEY_OPENAI for codex")
+        raise RuntimeError("Missing OPENAI_API_KEY for codex")
 
     out_path = CONFIG_DIR / f"codex_last_message_{_safe_log_name(command_id)}.txt"
     prompt = _build_codex_prompt(question)
@@ -530,11 +530,10 @@ def run() -> None:
     runner_id = _get_runner_id()
     hub_url = _get_hub_url()
     logger.info(
-        "[startup] runner=%s hub=%s OPENAI_API_KEY set=%s AI_MODEL_KEY_OPENAI set=%s",
+        "[startup] runner=%s hub=%s OPENAI_API_KEY set=%s",
         runner_id,
         hub_url,
         bool(os.getenv("OPENAI_API_KEY")),
-        bool(os.getenv("AI_MODEL_KEY_OPENAI")),
     )
 
     config = _load_cached_config()

@@ -35,7 +35,7 @@ class Settings:
     database_url: str | None
     ai_model_provider: str
     ai_model_name: str
-    ai_model_key_openai: str | None
+    openai_api_key: str | None
     workdir: str = "/workspaces/workdir/repo"
     branch_name: str = "knova/mvp-test"
 
@@ -50,5 +50,5 @@ def get_settings() -> Settings:
         database_url=_get_env("DATABASE_URL"),
         ai_model_provider=_get_env("AI_MODEL_PROVIDER", default="openai") or "openai",
         ai_model_name=_get_env("AI_MODEL_NAME", default="gpt-4o-mini") or "gpt-4o-mini",
-        ai_model_key_openai=_get_env("AI_MODEL_KEY_OPENAI"),
+        openai_api_key=_get_env("OPENAI_API_KEY"),
     )
