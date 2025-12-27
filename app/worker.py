@@ -6,6 +6,7 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -33,6 +34,7 @@ MAX_LOGGED_COMMANDS = 3
 
 DEFAULT_MESSAGE_ID = "main"
 CODEX_TIMEOUT_SEC = 5 * 60
+AGENT_REPO_DIR = Path("/workspaces/knova-agent")
 
 
 def _get_runner_id() -> str:
@@ -149,6 +151,31 @@ def _build_codex_prompt(question: str) -> str:
             f"Question: {question}",
         ]
     )
+
+
+def _run_git(command_id: str, args: list[str]) -> str:
+    _append_debug_log(command_id, f"[deploy] git {' '.join(args)}")
+    result = subprocess.run(
+        args,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.stdout:
+        _append_debug_log(command_id, f"[deploy] git stdout:\\n{result.stdout.strip()}")
+    if result.stderr:
+        _append_debug_log(command_id, f"[deploy] git stderr:\\n{result.stderr.strip()}")
+    if result.returncode != 0:
+        stderr_line = (result.stderr or "").strip().splitlines()[:1]
+        suffix = f": {stderr_line[0]}" if stderr_line else ""
+        raise RuntimeError(f"git command failed (exit {result.returncode}){suffix}")
+    return (result.stdout or "").strip()
+
+
+def _restart_self(command_id: str) -> None:
+    _append_debug_log(command_id, "[deploy] restarting worker process")
+    time.sleep(1)
+    os.execv(sys.executable, [sys.executable, "-m", "app.worker"])
 
 
 def _run_codex_exec(command_id: str, repo_dir: Path, question: str) -> str:
@@ -368,6 +395,9 @@ class CommandExecutor:
             self._pending_commands.add(command_id)
         self._queue.put({"command_id": command_id, "payload": payload})
 
+    def enqueue_deploy(self, command_id: str) -> None:
+        self.enqueue_command(command_id, {"type": "deploy"})
+
     def _next_seq(self, command_id: str) -> int:
         value = self._seq_by_command.get(command_id, 0)
         self._seq_by_command[command_id] = value + 1
@@ -399,8 +429,11 @@ class CommandExecutor:
             payload = item.get("payload")
             if not isinstance(command_id, str) or not isinstance(payload, dict):
                 continue
+            payload_type = payload.get("type")
             text = payload.get("text")
-            if not isinstance(text, str):
+            if payload_type == "deploy":
+                text = ""
+            elif not isinstance(text, str):
                 continue
 
             with self._state_lock:
@@ -409,10 +442,32 @@ class CommandExecutor:
             self._seq_by_command[command_id] = 0
             self._log_store.register_command(command_id)
 
-            _append_debug_log(command_id, f"[run] starting text_len={len(text)} repo_dir={self._repo_dir}")
+            _append_debug_log(
+                command_id,
+                f"[run] starting type={payload_type or 'command'} text_len={len(text)} repo_dir={self._repo_dir}",
+            )
             self._send_event(command_id, DEFAULT_MESSAGE_ID, "set_status", {"status": "STARTED"})
 
             try:
+                if payload_type == "deploy":
+                    self._send_event(
+                        command_id,
+                        DEFAULT_MESSAGE_ID,
+                        "set_text",
+                        {"text": "Updating knova-agent..."},
+                    )
+                    _run_git(command_id, ["git", "-C", str(AGENT_REPO_DIR), "fetch", "--all", "--prune"])
+                    _run_git(command_id, ["git", "-C", str(AGENT_REPO_DIR), "pull", "--ff-only"])
+                    self._send_event(
+                        command_id,
+                        DEFAULT_MESSAGE_ID,
+                        "set_text",
+                        {"text": "Update complete. Restarting agent..."},
+                    )
+                    self._send_event(command_id, DEFAULT_MESSAGE_ID, "terminal", {"result": "success"})
+                    _restart_self(command_id)
+                    continue
+
                 repo_dir = self._repo_dir
                 if repo_dir is not None:
                     try:
@@ -535,6 +590,12 @@ def run() -> None:
                 cmd_payload = payload.get("payload")
                 if isinstance(command_id, str) and isinstance(cmd_payload, dict):
                     executor.enqueue_command(command_id, cmd_payload)
+                return
+
+            if msg_type == "deploy":
+                command_id = payload.get("command_id")
+                if isinstance(command_id, str):
+                    executor.enqueue_deploy(command_id)
                 return
 
             if msg_type == "resync":
