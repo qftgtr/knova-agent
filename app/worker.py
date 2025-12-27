@@ -195,6 +195,8 @@ def _run_codex_exec(command_id: str, repo_dir: Path, question: str) -> str:
 
     cmd = [
         codex_path,
+        "--config",
+        "preferred_auth_method=\"apikey\"",
         "exec",
         prompt,
         "--full-auto",
