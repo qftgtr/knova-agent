@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -26,6 +28,7 @@ RECONNECT_DELAY_SEC = 5
 MAX_LOGGED_COMMANDS = 3
 
 DEFAULT_MESSAGE_ID = "main"
+CODEX_TIMEOUT_SEC = 5 * 60
 
 
 def _get_runner_id() -> str:
@@ -125,6 +128,64 @@ def _build_ws_url(hub_url: str, runner: str) -> str:
     else:
         raise RuntimeError("KNOVA_HUB_URL must start with http:// or https://")
     return f"{base.rstrip('/')}/workspace/ws?runner={runner}"
+
+
+def _get_openai_api_key() -> str | None:
+    return os.getenv("OPENAI_API_KEY") or os.getenv("AI_MODEL_KEY_OPENAI")
+
+
+def _build_codex_prompt(question: str) -> str:
+    return "\n".join(
+        [
+            "You are a coding assistant running inside a GitHub Codespace.",
+            "Answer based on the local repository files in the current workspace.",
+            "When relevant, cite file paths and line numbers (e.g. src/foo.ts:42).",
+            "Be concise and practical.",
+            "",
+            f"Question: {question}",
+        ]
+    )
+
+
+def _run_codex_exec(repo_dir: Path, question: str) -> str:
+    codex_path = shutil.which("codex")
+    if not codex_path:
+        raise RuntimeError("codex CLI not found in PATH")
+
+    api_key = _get_openai_api_key()
+    if not api_key:
+        raise RuntimeError("Missing OPENAI_API_KEY / AI_MODEL_KEY_OPENAI for codex")
+
+    out_path = CONFIG_DIR / "codex_last_message.txt"
+    prompt = _build_codex_prompt(question)
+
+    env = os.environ.copy()
+    env.setdefault("OPENAI_API_KEY", api_key)
+
+    cmd = [
+        codex_path,
+        "exec",
+        prompt,
+        "--full-auto",
+        "--cd",
+        str(repo_dir),
+        "--output-last-message",
+        str(out_path),
+    ]
+
+    subprocess.run(
+        cmd,
+        check=True,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=CODEX_TIMEOUT_SEC,
+    )
+
+    try:
+        return out_path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
 
 
 def _safe_log_name(command_id: str) -> str:
@@ -240,9 +301,13 @@ class CommandExecutor:
         self._seq_by_command: dict[str, int] = {}
         self._state_lock = threading.Lock()
         self._graph = build_graph(get_settings())
+        self._repo_dir: Path | None = None
 
         worker = threading.Thread(target=self._run, daemon=True)
         worker.start()
+
+    def set_repo_dir(self, repo_dir: Path) -> None:
+        self._repo_dir = repo_dir
 
     def enqueue_command(self, command_id: str, payload: dict[str, object]) -> None:
         with self._state_lock:
@@ -304,7 +369,13 @@ class CommandExecutor:
             self._send_event(command_id, DEFAULT_MESSAGE_ID, "set_status", {"status": "STARTED"})
 
             try:
-                reply = run_graph(self._graph, text, command_id)
+                repo_dir = self._repo_dir
+                if repo_dir is not None:
+                    reply = _run_codex_exec(repo_dir, text)
+                    if not reply:
+                        reply = run_graph(self._graph, text, command_id)
+                else:
+                    reply = run_graph(self._graph, text, command_id)
                 self._send_event(command_id, DEFAULT_MESSAGE_ID, "set_text", {"text": reply})
                 self._send_event(command_id, DEFAULT_MESSAGE_ID, "terminal", {"result": "success"})
             except Exception:
@@ -367,6 +438,7 @@ def run() -> None:
     sender = WsSender()
     log_store = CommandLogStore()
     executor = CommandExecutor(sender, log_store)
+    executor.set_repo_dir(workdir)
 
     ws_url = _build_ws_url(hub_url, runner_id)
     headers = [f"X-Knova-Secret: {secret}"]
