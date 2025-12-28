@@ -497,9 +497,54 @@ class CommandExecutor:
                 _append_debug_log(command_id, "[run] finished")
                 with self._state_lock:
                     self._current_command_id = None
-                    self._pending_commands.discard(command_id)
+                self._pending_commands.discard(command_id)
                 self._seq_by_command.pop(command_id, None)
 
+
+class DeployManager:
+    def __init__(self, sender: WsSender) -> None:
+        self._sender = sender
+        self._lock = threading.Lock()
+        self._running = False
+
+    def trigger(self, deploy_id: str | None) -> None:
+        if not deploy_id:
+            deploy_id = f"deploy:{int(time.time() * 1000)}"
+
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+
+        threading.Thread(
+            target=self._run,
+            args=(deploy_id,),
+            daemon=True,
+        ).start()
+
+    def _send_done(self, deploy_id: str, result: str, error: str | None = None) -> None:
+        payload: dict[str, object] = {
+            "type": "deploy_done",
+            "deploy_id": deploy_id,
+            "result": result,
+        }
+        if error:
+            payload["error"] = error
+        self._sender.send(payload)
+
+    def _run(self, deploy_id: str) -> None:
+        _append_debug_log(deploy_id, "[deploy] starting")
+        try:
+            _run_git(deploy_id, ["git", "-C", str(AGENT_REPO_DIR), "fetch", "--all", "--prune"])
+            _run_git(deploy_id, ["git", "-C", str(AGENT_REPO_DIR), "pull", "--ff-only"])
+            self._send_done(deploy_id, "success")
+            _restart_self(deploy_id)
+        except Exception as exc:
+            _append_debug_log(deploy_id, f"[deploy] failed: {exc}\\n{traceback.format_exc()}")
+            self._send_done(deploy_id, "failed", str(exc))
+        finally:
+            with self._lock:
+                self._running = False
 
 def _heartbeat_loop(sender: WsSender, stop_event: threading.Event) -> None:
     while not stop_event.wait(HEARTBEAT_INTERVAL_SEC):
@@ -562,6 +607,7 @@ def run() -> None:
     sender = WsSender()
     log_store = CommandLogStore()
     executor = CommandExecutor(sender, log_store)
+    deploy_manager = DeployManager(sender)
     executor.set_repo_dir(workdir)
 
     ws_url = _build_ws_url(hub_url, runner_id)
@@ -596,8 +642,11 @@ def run() -> None:
 
             if msg_type == "deploy":
                 command_id = payload.get("command_id")
+                deploy_id = payload.get("deploy_id")
                 if isinstance(command_id, str):
                     executor.enqueue_deploy(command_id)
+                else:
+                    deploy_manager.trigger(deploy_id if isinstance(deploy_id, str) else None)
                 return
 
             if msg_type == "resync":
